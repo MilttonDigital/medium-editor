@@ -45,10 +45,53 @@
 		contentDefault: '<b>#</b>',
 		contentFA: '<i class="fa fa-link"></i>',
 
+		wpLinkPopup: null,
+		linkObject: null,
+		mediumTextArea: null,
+
 		init: function () {
 			MediumEditor.extensions.form.prototype.init.apply(this, arguments);
 
 			this.subscribe('editableKeydown', this.handleKeydown.bind(this));
+
+		},
+
+		onWPLinkOpen: function (e) {
+
+			document.querySelector('#wp-link-text').value = this.linkObject.title;
+			document.querySelector('#wp-link-url').value = this.linkObject.value;
+			document.querySelector('#wp-link-target').checked = this.linkObject.target === '_blank';
+
+		},
+
+		onWPLinkClose: function () {
+
+			if (this.linkObject == null) {
+				return false;
+			}
+
+			this.mediumTextArea.remove();
+
+			// I gave up and used jQuery. Couldn't get regular eventlisteners to work.
+			jQuery(document).off('wplink-open');
+			jQuery(document).off('wplink-close');
+
+			var $submit = jQuery('#wp-link-submit');
+			var isSubmit = $submit.is(':hover') || $submit.is(':focus');
+
+			// Set value
+			if (isSubmit) {
+				this.linkObject = {
+					title: document.querySelector('#wp-link-text').value,
+					value: document.querySelector('#wp-link-url').value,
+					target: document.querySelector('#wp-link-target').checked ? '_blank' : ''
+				};
+				this.completeFormSave(this.linkObject);
+			} else {
+				this.doFormCancel();
+			}
+
+			this.linkObject = null;
 		},
 
 		// Called when the button the toolbar is clicked
@@ -65,9 +108,7 @@
 				return this.execAction('unlink');
 			}
 
-			if (!this.isDisplayed()) {
-				this.showForm();
-			}
+			this.showForm();
 
 			return false;
 		},
@@ -87,7 +128,7 @@
 			return this.form;
 		},
 
-		getTemplate: function () {
+		/*getTemplate: function () {
 			var template = [
 				'<input type="text" class="medium-editor-toolbar-input" placeholder="', this.placeholderText, '">'
 			];
@@ -133,7 +174,7 @@
 
 			return template.join('');
 
-		},
+		},*/
 
 		// Used by medium-editor when the default toolbar is to be displayed
 		isDisplayed: function () {
@@ -146,39 +187,47 @@
 		},
 
 		showForm: function (opts) {
-			var input = this.getInput(),
-				targetCheckbox = this.getAnchorTargetCheckbox(),
-				buttonCheckbox = this.getAnchorButtonCheckbox();
+			let list1 = jQuery(document).on('wplink-open', () => this.onWPLinkOpen());
+			let list2 = jQuery(document).on('wplink-close', () => this.onWPLinkClose());
 
-			opts = opts || { value: '' };
-			// TODO: This is for backwards compatability
-			// We don't need to support the 'string' argument in 6.0.0
-			if (typeof opts === 'string') {
-				opts = {
-					value: opts
-				};
+
+			var range = MediumEditor.selection.getSelectionRange(this.document);
+
+			this.mediumTextArea = this.document.createElement('textarea');
+			this.mediumTextArea.id = 'medium-link-textarea';
+			this.mediumTextArea.style.display = 'none';
+
+			let title = '';
+			let url = '';
+			let target = '';
+
+			if (range.startContainer.nodeName.toLowerCase() === 'a' ||
+				range.endContainer.nodeName.toLowerCase() === 'a' ||
+				MediumEditor.util.getClosestTag(MediumEditor.selection.getSelectedParentElement(range), 'a')) {
+				let anchor = MediumEditor.util.getClosestTag(MediumEditor.selection.getSelectedParentElement(range), 'a');
+				title = anchor.text;
+				url = anchor.href;
+				target = anchor.target;
+			} else {
+				title = range;
+				url = '';
 			}
+
+			this.linkObject = {
+				title: title,
+				value: url,
+				target: target
+			};
+
+			//var $textarea = $('<textarea id="acf-link-textarea" style="display:none;"></textarea>');
+			this.mediumTextArea = document.createElement('textarea');
+			this.mediumTextArea.id = 'medium-link-textarea';
+			this.mediumTextArea.style.display = 'none';
+			document.body.appendChild(this.mediumTextArea);
 
 			this.base.saveSelection();
-			this.hideToolbarDefaultActions();
-			MediumEditor.extensions.form.prototype.showForm.apply(this);
-			this.setToolbarPosition();
-
-			input.value = opts.value;
-			input.focus();
-
-			// If we have a target checkbox, we want it to be checked/unchecked
-			// based on whether the existing link has target=_blank
-			if (targetCheckbox) {
-				targetCheckbox.checked = opts.target === '_blank';
-			}
-
-			// If we have a custom class checkbox, we want it to be checked/unchecked
-			// based on whether an existing link already has the class
-			if (buttonCheckbox) {
-				var classList = opts.buttonClass ? opts.buttonClass.split(' ') : [];
-				buttonCheckbox.checked = (classList.indexOf(this.customClassOption) !== -1);
-			}
+			// open popup
+			wpLink.open('medium-link-textarea', this.linkObject.value, this.linkObject.title, null);
 		},
 
 		// Called by core when tearing down medium-editor (destroy)
@@ -196,33 +245,10 @@
 
 		// core methods
 
-		getFormOpts: function () {
-			// no notion of private functions? wanted `_getFormOpts`
-			var targetCheckbox = this.getAnchorTargetCheckbox(),
-				buttonCheckbox = this.getAnchorButtonCheckbox(),
-				opts = {
-					value: this.getInput().value.trim()
-				};
-
-			if (this.linkValidation) {
-				opts.value = this.checkLinkFormat(opts.value);
-			}
-
-			opts.target = '_self';
-			if (targetCheckbox && targetCheckbox.checked) {
-				opts.target = '_blank';
-			}
-
-			if (buttonCheckbox && buttonCheckbox.checked) {
-				opts.buttonClass = this.customClassOption;
-			}
-
-			return opts;
-		},
 
 		doFormSave: function () {
-			var opts = this.getFormOpts();
-			this.completeFormSave(opts);
+
+			this.completeFormSave(this.linkObject);
 		},
 
 		completeFormSave: function (opts) {
@@ -274,7 +300,7 @@
 				var host = path.split('/')[0];
 				// if the host part of the path looks like a hostname
 				if (host.match(/.+(\.|:).+/) || host === 'localhost') {
-					scheme = 'http://';
+					scheme = 'https://';
 				}
 			}
 
@@ -294,24 +320,7 @@
 		},
 
 		// form creation and event handling
-		attachFormEvents: function (form) {
-			var close = form.querySelector('.medium-editor-toolbar-close'),
-				save = form.querySelector('.medium-editor-toolbar-save'),
-				input = form.querySelector('.medium-editor-toolbar-input');
 
-			// Handle clicks on the form itself
-			this.on(form, 'click', this.handleFormClick.bind(this));
-
-			// Handle typing in the textbox
-			this.on(input, 'keyup', this.handleTextboxKeyup.bind(this));
-
-			// Handle close button clicks
-			this.on(close, 'click', this.handleCloseClick.bind(this));
-
-			// Handle save button clicks (capture)
-			this.on(save, 'click', this.handleSaveClick.bind(this), true);
-
-		},
 
 		createForm: function () {
 			var doc = this.document,
@@ -320,55 +329,15 @@
 			// Anchor Form (div)
 			form.className = 'medium-editor-toolbar-form';
 			form.id = 'medium-editor-toolbar-form-anchor-' + this.getEditorId();
-			form.innerHTML = this.getTemplate();
-			this.attachFormEvents(form);
+
+			//form.innerHTML = this.getTemplate();
+
 
 			return form;
 		},
 
-		getInput: function () {
-			return this.getForm().querySelector('input.medium-editor-toolbar-input');
-		},
 
-		getAnchorTargetCheckbox: function () {
-			return this.getForm().querySelector('.medium-editor-toolbar-anchor-target');
-		},
 
-		getAnchorButtonCheckbox: function () {
-			return this.getForm().querySelector('.medium-editor-toolbar-anchor-button');
-		},
-
-		handleTextboxKeyup: function (event) {
-			// For ENTER -> create the anchor
-			if (event.keyCode === MediumEditor.util.keyCode.ENTER) {
-				event.preventDefault();
-				this.doFormSave();
-				return;
-			}
-
-			// For ESCAPE -> close the form
-			if (event.keyCode === MediumEditor.util.keyCode.ESCAPE) {
-				event.preventDefault();
-				this.doFormCancel();
-			}
-		},
-
-		handleFormClick: function (event) {
-			// make sure not to hide form when clicking inside the form
-			event.stopPropagation();
-		},
-
-		handleSaveClick: function (event) {
-			// Clicking Save -> create the anchor
-			event.preventDefault();
-			this.doFormSave();
-		},
-
-		handleCloseClick: function (event) {
-			// Click Close -> close the form
-			event.preventDefault();
-			this.doFormCancel();
-		}
 	});
 
 	MediumEditor.extensions.anchor = AnchorForm;

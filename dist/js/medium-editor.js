@@ -1079,19 +1079,90 @@ MediumEditor.extensions = {};
             return false;
         },
 
-        cleanListDOM: function (ownerDocument, element) {
-            if (element.nodeName.toLowerCase() !== 'li') {
-                return;
+        findFirstTextNodeInSelection: function (selection) {
+            if (selection.anchorNode.nodeType === 3) {
+                return selection.anchorNode;
             }
 
-            var list = element.parentElement;
+            var node = selection.anchorNode.firstChild;
 
-            if (list.parentElement.nodeName.toLowerCase() === 'p') { // yes we need to clean up
-                Util.unwrap(list.parentElement, ownerDocument);
+            while (node) {
+                if (selection.containsNode(node, true)) {
+                    if (node.nodeType === 3) {
+                        return node;
+                    } else {
+                        node = node.firstChild;
+                    }
+                } else {
+                    node = node.nextSibling;
+                }
+            }
 
-                // move cursor at the end of the text inside the list
-                // for some unknown reason, the cursor is moved to end of the "visual" line
-                MediumEditor.selection.moveCursor(ownerDocument, element.firstChild, element.firstChild.textContent.length);
+            return null;
+        },
+
+        cleanListDOM: function (ownerDocument, element) {
+            if (element.nodeName.toLowerCase() !== 'li') {
+                if (this.isIE || this.isEdge) {
+                    return;
+                }
+
+                var selection = ownerDocument.getSelection(),
+                    newRange = ownerDocument.createRange(),
+                    oldRange = selection.getRangeAt(0),
+                    startContainer = oldRange.startContainer,
+                    startOffset = oldRange.startOffset,
+                    endContainer = oldRange.endContainer,
+                    endOffset = oldRange.endOffset,
+                    node, newNode, nextNode, moveEndOffset;
+
+                if (element.nodeName.toLowerCase() === 'span') {
+                    // Chrome & Safari unwraps removed li elements into a span
+                    node = element;
+                    moveEndOffset = false;
+                } else {
+                    // FF leaves them as text nodes
+                    node = this.findFirstTextNodeInSelection(selection);
+                    moveEndOffset = startContainer.nodeType !== 3;
+                }
+
+                while (node) {
+                    if (node.nodeName.toLowerCase() !== 'span' && node.nodeType !== 3) {
+                        break;
+                    }
+
+                    if (node.nextSibling && node.nextSibling.nodeName.toLowerCase() === 'br') {
+                        node.nextSibling.remove();
+
+                        if (moveEndOffset) {
+                            endOffset--;
+                        }
+                    }
+
+                    nextNode = node.nextSibling;
+
+                    newNode = ownerDocument.createElement('p');
+                    node.parentNode.replaceChild(newNode, node);
+                    newNode.appendChild(node);
+
+                    node = nextNode;
+                }
+
+                // Restore selection
+                newRange.setStart(startContainer, startOffset);
+                newRange.setEnd(endContainer, endOffset);
+                selection.removeAllRanges();
+                selection.addRange(newRange);
+            } else {
+                var list = element.parentElement;
+
+                if (list.parentElement.nodeName.toLowerCase() === 'p') { // yes we need to clean up
+                    Util.unwrap(list.parentElement, ownerDocument);
+
+                    // move cursor at the end of the text inside the list
+                    // for some unknown reason, the cursor is moved to end of the "visual" line
+                    MediumEditor.selection.moveCursor(ownerDocument, element.firstChild, element.firstChild.textContent.length);
+                }
             }
         },
 
@@ -3593,7 +3664,7 @@ MediumEditor.extensions = {};
             return false;
         },
 
-        /* hideForm: [function ()]
+        /* showForm: [function ()]
          *
          * This function should show the form element inside
          * the toolbar container
@@ -3664,686 +3735,655 @@ MediumEditor.extensions = {};
     MediumEditor.extensions.form = FormExtension;
 })();
 (function () {
-    'use strict';
-
-    var AnchorForm = MediumEditor.extensions.form.extend({
-        /* Anchor Form Options */
-
-        /* customClassOption: [string]  (previously options.anchorButton + options.anchorButtonClass)
-         * Custom class name the user can optionally have added to their created links (ie 'button').
-         * If passed as a non-empty string, a checkbox will be displayed allowing the user to choose
-         * whether to have the class added to the created link or not.
-         */
-        customClassOption: null,
-
-        /* customClassOptionText: [string]
-         * text to be shown in the checkbox when the __customClassOption__ is being used.
-         */
-        customClassOptionText: 'Button',
-
-        /* linkValidation: [boolean]  (previously options.checkLinkFormat)
-         * enables/disables check for common URL protocols on anchor links.
-         */
-        linkValidation: false,
-
-        /* placeholderText: [string]  (previously options.anchorInputPlaceholder)
-         * text to be shown as placeholder of the anchor input.
-         */
-        placeholderText: 'Paste or type a link',
-
-        /* targetCheckbox: [boolean]  (previously options.anchorTarget)
-         * enables/disables displaying a "Open in new window" checkbox, which when checked
-         * changes the `target` attribute of the created link.
-         */
-        targetCheckbox: false,
-
-        /* targetCheckboxText: [string]  (previously options.anchorInputCheckboxLabel)
-         * text to be shown in the checkbox enabled via the __targetCheckbox__ option.
-         */
-        targetCheckboxText: 'Open in new window',
-
-        // Options for the Button base class
-        name: 'anchor',
-        action: 'createLink',
-        aria: 'link',
-        tagNames: ['a'],
-        contentDefault: '<b>#</b>',
-        contentFA: '<i class="fa fa-link"></i>',
-
-        init: function () {
-            MediumEditor.extensions.form.prototype.init.apply(this, arguments);
-
-            this.subscribe('editableKeydown', this.handleKeydown.bind(this));
-        },
-
-        // Called when the button the toolbar is clicked
-        // Overrides ButtonExtension.handleClick
-        handleClick: function (event) {
-            event.preventDefault();
-            event.stopPropagation();
-
-            var range = MediumEditor.selection.getSelectionRange(this.document);
-
-            if (range.startContainer.nodeName.toLowerCase() === 'a' ||
-                range.endContainer.nodeName.toLowerCase() === 'a' ||
-                MediumEditor.util.getClosestTag(MediumEditor.selection.getSelectedParentElement(range), 'a')) {
-                return this.execAction('unlink');
-            }
-
-            if (!this.isDisplayed()) {
-                this.showForm();
-            }
-
-            return false;
-        },
-
-        // Called when user hits the defined shortcut (CTRL / COMMAND + K)
-        handleKeydown: function (event) {
-            if (MediumEditor.util.isKey(event, MediumEditor.util.keyCode.K) && MediumEditor.util.isMetaCtrlKey(event) && !event.shiftKey) {
-                this.handleClick(event);
-            }
-        },
-
-        // Called by medium-editor to append form to the toolbar
-        getForm: function () {
-            if (!this.form) {
-                this.form = this.createForm();
-            }
-            return this.form;
-        },
-
-        getTemplate: function () {
-            var template = [
-                '<input type="text" class="medium-editor-toolbar-input" placeholder="', this.placeholderText, '">'
-            ];
-
-            template.push(
-                '<a href="#" class="medium-editor-toolbar-save">',
-                this.getEditorOption('buttonLabels') === 'fontawesome' ? '<i class="fa fa-check"></i>' : this.formSaveLabel,
-                '</a>'
-            );
-
-            template.push('<a href="#" class="medium-editor-toolbar-close">',
-                this.getEditorOption('buttonLabels') === 'fontawesome' ? '<i class="fa fa-times"></i>' : this.formCloseLabel,
-                '</a>');
-
-            // both of these options are slightly moot with the ability to
-            // override the various form buildup/serialize functions.
-
-            if (this.targetCheckbox) {
-                // fixme: ideally, this targetCheckboxText would be a formLabel too,
-                // figure out how to deprecate? also consider `fa-` icon default implcations.
-                template.push(
-                    '<div class="medium-editor-toolbar-form-row">',
-                    '<input type="checkbox" class="medium-editor-toolbar-anchor-target" id="medium-editor-toolbar-anchor-target-field-' + this.getEditorId() + '">',
-                    '<label for="medium-editor-toolbar-anchor-target-field-' + this.getEditorId() + '">',
-                    this.targetCheckboxText,
-                    '</label>',
-                    '</div>'
-                );
-            }
-
-            if (this.customClassOption) {
-                // fixme: expose this `Button` text as a formLabel property, too
-                // and provide similar access to a `fa-` icon default.
-                template.push(
-                    '<div class="medium-editor-toolbar-form-row">',
-                    '<input type="checkbox" class="medium-editor-toolbar-anchor-button">',
-                    '<label>',
-                    this.customClassOptionText,
-                    '</label>',
-                    '</div>'
-                );
-            }
-
-            return template.join('');
-
-        },
-
-        // Used by medium-editor when the default toolbar is to be displayed
-        isDisplayed: function () {
-            return MediumEditor.extensions.form.prototype.isDisplayed.apply(this);
-        },
-
-        hideForm: function () {
-            MediumEditor.extensions.form.prototype.hideForm.apply(this);
-            this.getInput().value = '';
-        },
-
-        showForm: function (opts) {
-            var input = this.getInput(),
-                targetCheckbox = this.getAnchorTargetCheckbox(),
-                buttonCheckbox = this.getAnchorButtonCheckbox();
-
-            opts = opts || { value: '' };
-            // TODO: This is for backwards compatability
-            // We don't need to support the 'string' argument in 6.0.0
-            if (typeof opts === 'string') {
-                opts = {
-                    value: opts
-                };
-            }
-
-            this.base.saveSelection();
-            this.hideToolbarDefaultActions();
-            MediumEditor.extensions.form.prototype.showForm.apply(this);
-            this.setToolbarPosition();
-
-            input.value = opts.value;
-            input.focus();
-
-            // If we have a target checkbox, we want it to be checked/unchecked
-            // based on whether the existing link has target=_blank
-            if (targetCheckbox) {
-                targetCheckbox.checked = opts.target === '_blank';
-            }
-
-            // If we have a custom class checkbox, we want it to be checked/unchecked
-            // based on whether an existing link already has the class
-            if (buttonCheckbox) {
-                var classList = opts.buttonClass ? opts.buttonClass.split(' ') : [];
-                buttonCheckbox.checked = (classList.indexOf(this.customClassOption) !== -1);
-            }
-        },
-
-        // Called by core when tearing down medium-editor (destroy)
-        destroy: function () {
-            if (!this.form) {
-                return false;
-            }
-
-            if (this.form.parentNode) {
-                this.form.parentNode.removeChild(this.form);
-            }
-
-            delete this.form;
-        },
-
-        // core methods
-
-        getFormOpts: function () {
-            // no notion of private functions? wanted `_getFormOpts`
-            var targetCheckbox = this.getAnchorTargetCheckbox(),
-                buttonCheckbox = this.getAnchorButtonCheckbox(),
-                opts = {
-                    value: this.getInput().value.trim()
-                };
-
-            if (this.linkValidation) {
-                opts.value = this.checkLinkFormat(opts.value);
-            }
-
-            opts.target = '_self';
-            if (targetCheckbox && targetCheckbox.checked) {
-                opts.target = '_blank';
-            }
-
-            if (buttonCheckbox && buttonCheckbox.checked) {
-                opts.buttonClass = this.customClassOption;
-            }
-
-            return opts;
-        },
-
-        doFormSave: function () {
-            var opts = this.getFormOpts();
-            this.completeFormSave(opts);
-        },
-
-        completeFormSave: function (opts) {
-            this.base.restoreSelection();
-            this.execAction(this.action, opts);
-            this.base.checkSelection();
-        },
-
-        ensureEncodedUri: function (str) {
-            return str === decodeURI(str) ? encodeURI(str) : str;
-        },
-
-        ensureEncodedUriComponent: function (str) {
-            return str === decodeURIComponent(str) ? encodeURIComponent(str) : str;
-        },
-
-        ensureEncodedParam: function (param) {
-            var split = param.split('='),
-                key = split[0],
-                val = split[1];
-
-            return key + (val === undefined ? '' : '=' + this.ensureEncodedUriComponent(val));
-        },
-
-        ensureEncodedQuery: function (queryString) {
-            return queryString.split('&').map(this.ensureEncodedParam.bind(this)).join('&');
-        },
-
-        checkLinkFormat: function (value) {
-            // Matches any alphabetical characters followed by ://
-            // Matches protocol relative "//"
-            // Matches common external protocols "mailto:" "tel:" "maps:"
-            // Matches relative hash link, begins with "#"
-            var urlSchemeRegex = /^([a-z]+:)?\/\/|^(mailto|tel|maps):|^\#/i,
-                hasScheme = urlSchemeRegex.test(value),
-                scheme = '',
-                // telRegex is a regex for checking if the string is a telephone number
-                telRegex = /^\+?\s?\(?(?:\d\s?\-?\)?){3,20}$/,
-                urlParts = value.match(/^(.*?)(?:\?(.*?))?(?:#(.*))?$/),
-                path = urlParts[1],
-                query = urlParts[2],
-                fragment = urlParts[3];
-
-            if (telRegex.test(value)) {
-                return 'tel:' + value;
-            }
-
-            if (!hasScheme) {
-                var host = path.split('/')[0];
-                // if the host part of the path looks like a hostname
-                if (host.match(/.+(\.|:).+/) || host === 'localhost') {
-                    scheme = 'http://';
-                }
-            }
-
-            return scheme +
-                // Ensure path is encoded
-                this.ensureEncodedUri(path) +
-                // Ensure query is encoded
-                (query === undefined ? '' : '?' + this.ensureEncodedQuery(query)) +
-                // Include fragment unencoded as encodeUriComponent is too
-                // heavy handed for the many characters allowed in a fragment
-                (fragment === undefined ? '' : '#' + fragment);
-        },
-
-        doFormCancel: function () {
-            this.base.restoreSelection();
-            this.base.checkSelection();
-        },
-
-        // form creation and event handling
-        attachFormEvents: function (form) {
-            var close = form.querySelector('.medium-editor-toolbar-close'),
-                save = form.querySelector('.medium-editor-toolbar-save'),
-                input = form.querySelector('.medium-editor-toolbar-input');
-
-            // Handle clicks on the form itself
-            this.on(form, 'click', this.handleFormClick.bind(this));
-
-            // Handle typing in the textbox
-            this.on(input, 'keyup', this.handleTextboxKeyup.bind(this));
-
-            // Handle close button clicks
-            this.on(close, 'click', this.handleCloseClick.bind(this));
-
-            // Handle save button clicks (capture)
-            this.on(save, 'click', this.handleSaveClick.bind(this), true);
-
-        },
-
-        createForm: function () {
-            var doc = this.document,
-                form = doc.createElement('div');
-
-            // Anchor Form (div)
-            form.className = 'medium-editor-toolbar-form';
-            form.id = 'medium-editor-toolbar-form-anchor-' + this.getEditorId();
-            form.innerHTML = this.getTemplate();
-            this.attachFormEvents(form);
-
-            return form;
-        },
-
-        getInput: function () {
-            return this.getForm().querySelector('input.medium-editor-toolbar-input');
-        },
-
-        getAnchorTargetCheckbox: function () {
-            return this.getForm().querySelector('.medium-editor-toolbar-anchor-target');
-        },
-
-        getAnchorButtonCheckbox: function () {
-            return this.getForm().querySelector('.medium-editor-toolbar-anchor-button');
-        },
-
-        handleTextboxKeyup: function (event) {
-            // For ENTER -> create the anchor
-            if (event.keyCode === MediumEditor.util.keyCode.ENTER) {
-                event.preventDefault();
-                this.doFormSave();
-                return;
-            }
-
-            // For ESCAPE -> close the form
-            if (event.keyCode === MediumEditor.util.keyCode.ESCAPE) {
-                event.preventDefault();
-                this.doFormCancel();
-            }
-        },
-
-        handleFormClick: function (event) {
-            // make sure not to hide form when clicking inside the form
-            event.stopPropagation();
-        },
-
-        handleSaveClick: function (event) {
-            // Clicking Save -> create the anchor
-            event.preventDefault();
-            this.doFormSave();
-        },
-
-        handleCloseClick: function (event) {
-            // Click Close -> close the form
-            event.preventDefault();
-            this.doFormCancel();
-        }
-    });
-
-    MediumEditor.extensions.anchor = AnchorForm;
+	'use strict';
+
+	var AnchorForm = MediumEditor.extensions.form.extend({
+		/* Anchor Form Options */
+
+		/* customClassOption: [string]  (previously options.anchorButton + options.anchorButtonClass)
+		 * Custom class name the user can optionally have added to their created links (ie 'button').
+		 * If passed as a non-empty string, a checkbox will be displayed allowing the user to choose
+		 * whether to have the class added to the created link or not.
+		 */
+		customClassOption: null,
+
+		/* customClassOptionText: [string]
+		 * text to be shown in the checkbox when the __customClassOption__ is being used.
+		 */
+		customClassOptionText: 'Button',
+
+		/* linkValidation: [boolean]  (previously options.checkLinkFormat)
+		 * enables/disables check for common URL protocols on anchor links.
+		 */
+		linkValidation: false,
+
+		/* placeholderText: [string]  (previously options.anchorInputPlaceholder)
+		 * text to be shown as placeholder of the anchor input.
+		 */
+		placeholderText: 'Paste or type a link',
+
+		/* targetCheckbox: [boolean]  (previously options.anchorTarget)
+		 * enables/disables displaying a "Open in new window" checkbox, which when checked
+		 * changes the `target` attribute of the created link.
+		 */
+		targetCheckbox: false,
+
+		/* targetCheckboxText: [string]  (previously options.anchorInputCheckboxLabel)
+		 * text to be shown in the checkbox enabled via the __targetCheckbox__ option.
+		 */
+		targetCheckboxText: 'Open in new window',
+
+		// Options for the Button base class
+		name: 'anchor',
+		action: 'createLink',
+		aria: 'link',
+		tagNames: ['a'],
+		contentDefault: '<b>#</b>',
+		contentFA: '<i class="fa fa-link"></i>',
+
+		wpLinkPopup: null,
+		linkObject: null,
+		mediumTextArea: null,
+
+		init: function () {
+			MediumEditor.extensions.form.prototype.init.apply(this, arguments);
+
+			this.subscribe('editableKeydown', this.handleKeydown.bind(this));
+
+		},
+
+		onWPLinkOpen: function (e) {
+
+			document.querySelector('#wp-link-text').value = this.linkObject.title;
+			document.querySelector('#wp-link-url').value = this.linkObject.value;
+			document.querySelector('#wp-link-target').checked = this.linkObject.target === '_blank';
+
+		},
+
+		onWPLinkClose: function () {
+
+			if (this.linkObject == null) {
+				return false;
+			}
+
+			this.mediumTextArea.remove();
+
+			// I gave up and used jQuery. Couldn't get regular eventlisteners to work.
+			jQuery(document).off('wplink-open');
+			jQuery(document).off('wplink-close');
+
+			var $submit = jQuery('#wp-link-submit');
+			var isSubmit = $submit.is(':hover') || $submit.is(':focus');
+
+			// Set value
+			if (isSubmit) {
+				this.linkObject = {
+					title: document.querySelector('#wp-link-text').value,
+					value: document.querySelector('#wp-link-url').value,
+					target: document.querySelector('#wp-link-target').checked ? '_blank' : ''
+				};
+				this.completeFormSave(this.linkObject);
+			} else {
+				this.doFormCancel();
+			}
+
+			this.linkObject = null;
+		},
+
+		// Called when the button the toolbar is clicked
+		// Overrides ButtonExtension.handleClick
+		handleClick: function (event) {
+			event.preventDefault();
+			event.stopPropagation();
+
+			var range = MediumEditor.selection.getSelectionRange(this.document);
+
+			if (range.startContainer.nodeName.toLowerCase() === 'a' ||
+				range.endContainer.nodeName.toLowerCase() === 'a' ||
+				MediumEditor.util.getClosestTag(MediumEditor.selection.getSelectedParentElement(range), 'a')) {
+				return this.execAction('unlink');
+			}
+
+			this.showForm();
+
+			return false;
+		},
+
+		// Called when user hits the defined shortcut (CTRL / COMMAND + K)
+		handleKeydown: function (event) {
+			if (MediumEditor.util.isKey(event, MediumEditor.util.keyCode.K) && MediumEditor.util.isMetaCtrlKey(event) && !event.shiftKey) {
+				this.handleClick(event);
+			}
+		},
+
+		// Called by medium-editor to append form to the toolbar
+		getForm: function () {
+			if (!this.form) {
+				this.form = this.createForm();
+			}
+			return this.form;
+		},
+
+		/*getTemplate: function () {
+			var template = [
+				'<input type="text" class="medium-editor-toolbar-input" placeholder="', this.placeholderText, '">'
+			];
+
+			template.push(
+				'<a href="#" class="medium-editor-toolbar-save">',
+				this.getEditorOption('buttonLabels') === 'fontawesome' ? '<i class="fa fa-check"></i>' : this.formSaveLabel,
+				'</a>'
+			);
+
+			template.push('<a href="#" class="medium-editor-toolbar-close">',
+				this.getEditorOption('buttonLabels') === 'fontawesome' ? '<i class="fa fa-times"></i>' : this.formCloseLabel,
+				'</a>');
+
+			// both of these options are slightly moot with the ability to
+			// override the various form buildup/serialize functions.
+
+			if (this.targetCheckbox) {
+				// fixme: ideally, this targetCheckboxText would be a formLabel too,
+				// figure out how to deprecate? also consider `fa-` icon default implcations.
+				template.push(
+					'<div class="medium-editor-toolbar-form-row">',
+					'<input type="checkbox" class="medium-editor-toolbar-anchor-target" id="medium-editor-toolbar-anchor-target-field-' + this.getEditorId() + '">',
+					'<label for="medium-editor-toolbar-anchor-target-field-' + this.getEditorId() + '">',
+					this.targetCheckboxText,
+					'</label>',
+					'</div>'
+				);
+			}
+
+			if (this.customClassOption) {
+				// fixme: expose this `Button` text as a formLabel property, too
+				// and provide similar access to a `fa-` icon default.
+				template.push(
+					'<div class="medium-editor-toolbar-form-row">',
+					'<input type="checkbox" class="medium-editor-toolbar-anchor-button" id="medium-editor-toolbar-anchor-button-field-' + this.getEditorId() + '">',
+					'<label for="medium-editor-toolbar-anchor-button-field-' + this.getEditorId() + '">',
+					this.customClassOptionText,
+					'</label>',
+					'</div>'
+				);
+			}
+
+			return template.join('');
+
+		},*/
+
+		// Used by medium-editor when the default toolbar is to be displayed
+		isDisplayed: function () {
+			return MediumEditor.extensions.form.prototype.isDisplayed.apply(this);
+		},
+
+		hideForm: function () {
+			MediumEditor.extensions.form.prototype.hideForm.apply(this);
+			this.getInput().value = '';
+		},
+
+		showForm: function (opts) {
+			let list1 = jQuery(document).on('wplink-open', () => this.onWPLinkOpen());
+			let list2 = jQuery(document).on('wplink-close', () => this.onWPLinkClose());
+
+
+			var range = MediumEditor.selection.getSelectionRange(this.document);
+
+			this.mediumTextArea = this.document.createElement('textarea');
+			this.mediumTextArea.id = 'medium-link-textarea';
+			this.mediumTextArea.style.display = 'none';
+
+			let title = '';
+			let url = '';
+			let target = '';
+
+			if (range.startContainer.nodeName.toLowerCase() === 'a' ||
+				range.endContainer.nodeName.toLowerCase() === 'a' ||
+				MediumEditor.util.getClosestTag(MediumEditor.selection.getSelectedParentElement(range), 'a')) {
+				let anchor = MediumEditor.util.getClosestTag(MediumEditor.selection.getSelectedParentElement(range), 'a');
+				title = anchor.text;
+				url = anchor.href;
+				target = anchor.target;
+			} else {
+				title = range;
+				url = '';
+			}
+
+			this.linkObject = {
+				title: title,
+				value: url,
+				target: target
+			};
+
+			//var $textarea = $('<textarea id="acf-link-textarea" style="display:none;"></textarea>');
+			this.mediumTextArea = document.createElement('textarea');
+			this.mediumTextArea.id = 'medium-link-textarea';
+			this.mediumTextArea.style.display = 'none';
+			document.body.appendChild(this.mediumTextArea);
+
+			this.base.saveSelection();
+			// open popup
+			wpLink.open('medium-link-textarea', this.linkObject.value, this.linkObject.title, null);
+		},
+
+		// Called by core when tearing down medium-editor (destroy)
+		destroy: function () {
+			if (!this.form) {
+				return false;
+			}
+
+			if (this.form.parentNode) {
+				this.form.parentNode.removeChild(this.form);
+			}
+
+			delete this.form;
+		},
+
+		// core methods
+
+
+		doFormSave: function () {
+
+			this.completeFormSave(this.linkObject);
+		},
+
+		completeFormSave: function (opts) {
+			this.base.restoreSelection();
+			this.execAction(this.action, opts);
+			this.base.checkSelection();
+		},
+
+		ensureEncodedUri: function (str) {
+			return str === decodeURI(str) ? encodeURI(str) : str;
+		},
+
+		ensureEncodedUriComponent: function (str) {
+			return str === decodeURIComponent(str) ? encodeURIComponent(str) : str;
+		},
+
+		ensureEncodedParam: function (param) {
+			var split = param.split('='),
+				key = split[0],
+				val = split[1];
+
+			return key + (val === undefined ? '' : '=' + this.ensureEncodedUriComponent(val));
+		},
+
+		ensureEncodedQuery: function (queryString) {
+			return queryString.split('&').map(this.ensureEncodedParam.bind(this)).join('&');
+		},
+
+		checkLinkFormat: function (value) {
+			// Matches any alphabetical characters followed by ://
+			// Matches protocol relative "//"
+			// Matches common external protocols "mailto:" "tel:" "maps:"
+			// Matches relative hash link, begins with "#"
+			var urlSchemeRegex = /^([a-z]+:)?\/\/|^(mailto|tel|maps):|^\#/i,
+				hasScheme = urlSchemeRegex.test(value),
+				scheme = '',
+				// telRegex is a regex for checking if the string is a telephone number
+				telRegex = /^\+?\s?\(?(?:\d\s?\-?\)?){3,20}$/,
+				urlParts = value.match(/^(.*?)(?:\?(.*?))?(?:#(.*))?$/),
+				path = urlParts[1],
+				query = urlParts[2],
+				fragment = urlParts[3];
+
+			if (telRegex.test(value)) {
+				return 'tel:' + value;
+			}
+
+			if (!hasScheme) {
+				var host = path.split('/')[0];
+				// if the host part of the path looks like a hostname
+				if (host.match(/.+(\.|:).+/) || host === 'localhost') {
+					scheme = 'https://';
+				}
+			}
+
+			return scheme +
+				// Ensure path is encoded
+				this.ensureEncodedUri(path) +
+				// Ensure query is encoded
+				(query === undefined ? '' : '?' + this.ensureEncodedQuery(query)) +
+				// Include fragment unencoded as encodeUriComponent is too
+				// heavy handed for the many characters allowed in a fragment
+				(fragment === undefined ? '' : '#' + fragment);
+		},
+
+		doFormCancel: function () {
+			this.base.restoreSelection();
+			this.base.checkSelection();
+		},
+
+		// form creation and event handling
+
+
+		createForm: function () {
+			var doc = this.document,
+				form = doc.createElement('div');
+
+			// Anchor Form (div)
+			form.className = 'medium-editor-toolbar-form';
+			form.id = 'medium-editor-toolbar-form-anchor-' + this.getEditorId();
+
+			//form.innerHTML = this.getTemplate();
+
+
+			return form;
+		},
+
+
+
+	});
+
+	MediumEditor.extensions.anchor = AnchorForm;
 }());
 
 (function () {
-    'use strict';
+	'use strict';
 
-    var AnchorPreview = MediumEditor.Extension.extend({
-        name: 'anchor-preview',
+	var AnchorPreview = MediumEditor.Extension.extend({
+		name: 'anchor-preview',
 
-        // Anchor Preview Options
+		// Anchor Preview Options
 
-        /* hideDelay: [number]  (previously options.anchorPreviewHideDelay)
-         * time in milliseconds to show the anchor tag preview after the mouse has left the anchor tag.
-         */
-        hideDelay: 500,
+		/* hideDelay: [number]  (previously options.anchorPreviewHideDelay)
+		 * time in milliseconds to show the anchor tag preview after the mouse has left the anchor tag.
+		 */
+		hideDelay: 500,
 
-        /* previewValueSelector: [string]
-         * the default selector to locate where to put the activeAnchor value in the preview
-         */
-        previewValueSelector: 'a',
+		/* previewValueSelector: [string]
+		 * the default selector to locate where to put the activeAnchor value in the preview
+		 */
+		previewValueSelector: 'a',
 
-        /* showWhenToolbarIsVisible: [boolean]
-         * determines whether the anchor tag preview shows up when the toolbar is visible
-         */
-        showWhenToolbarIsVisible: false,
+		/* showWhenToolbarIsVisible: [boolean]
+		 * determines whether the anchor tag preview shows up when the toolbar is visible
+		 */
+		showWhenToolbarIsVisible: false,
 
-        /* showOnEmptyLinks: [boolean]
-        * determines whether the anchor tag preview shows up on links with href="" or href="#something"
-        */
-        showOnEmptyLinks: true,
+		/* showOnEmptyLinks: [boolean]
+		* determines whether the anchor tag preview shows up on links with href="" or href="#something"
+		*/
+		showOnEmptyLinks: true,
 
-        init: function () {
-            this.anchorPreview = this.createPreview();
+		init: function () {
+			this.anchorPreview = this.createPreview();
 
-            this.getEditorOption('elementsContainer').appendChild(this.anchorPreview);
+			this.getEditorOption('elementsContainer').appendChild(this.anchorPreview);
 
-            this.attachToEditables();
-        },
+			this.attachToEditables();
+		},
 
-        getInteractionElements: function () {
-            return this.getPreviewElement();
-        },
+		getInteractionElements: function () {
+			return this.getPreviewElement();
+		},
 
-        // TODO: Remove this function in 6.0.0
-        getPreviewElement: function () {
-            return this.anchorPreview;
-        },
+		// TODO: Remove this function in 6.0.0
+		getPreviewElement: function () {
+			return this.anchorPreview;
+		},
 
-        createPreview: function () {
-            var el = this.document.createElement('div');
+		createPreview: function () {
+			var el = this.document.createElement('div');
 
-            el.id = 'medium-editor-anchor-preview-' + this.getEditorId();
-            el.className = 'medium-editor-anchor-preview';
-            el.innerHTML = this.getTemplate();
+			el.id = 'medium-editor-anchor-preview-' + this.getEditorId();
+			el.className = 'medium-editor-anchor-preview';
+			el.innerHTML = this.getTemplate();
 
-            this.on(el, 'click', this.handleClick.bind(this));
+			this.on(el, 'click', this.handleClick.bind(this));
 
-            return el;
-        },
+			return el;
+		},
 
-        getTemplate: function () {
-            return '<div class="medium-editor-toolbar-anchor-preview" id="medium-editor-toolbar-anchor-preview">' +
-                '    <a class="medium-editor-toolbar-anchor-preview-inner"></a>' +
-                '</div>';
-        },
+		getTemplate: function () {
+			return '<div class="medium-editor-toolbar-anchor-preview" id="medium-editor-toolbar-anchor-preview">' +
+				'    <a class="medium-editor-toolbar-anchor-preview-inner"></a>' +
+				'</div>';
+		},
 
-        destroy: function () {
-            if (this.anchorPreview) {
-                if (this.anchorPreview.parentNode) {
-                    this.anchorPreview.parentNode.removeChild(this.anchorPreview);
-                }
-                delete this.anchorPreview;
-            }
-        },
+		destroy: function () {
+			if (this.anchorPreview) {
+				if (this.anchorPreview.parentNode) {
+					this.anchorPreview.parentNode.removeChild(this.anchorPreview);
+				}
+				delete this.anchorPreview;
+			}
+		},
 
-        hidePreview: function () {
-            if (this.anchorPreview) {
-                this.anchorPreview.classList.remove('medium-editor-anchor-preview-active');
-            }
-            this.activeAnchor = null;
-        },
+		hidePreview: function () {
+			if (this.anchorPreview) {
+				this.anchorPreview.classList.remove('medium-editor-anchor-preview-active');
+			}
+			this.activeAnchor = null;
+		},
 
-        showPreview: function (anchorEl) {
-            if (this.anchorPreview.classList.contains('medium-editor-anchor-preview-active') ||
-                    anchorEl.getAttribute('data-disable-preview')) {
-                return true;
-            }
+		showPreview: function (anchorEl) {
+			if (this.anchorPreview.classList.contains('medium-editor-anchor-preview-active') ||
+				anchorEl.getAttribute('data-disable-preview')) {
+				return true;
+			}
 
-            if (this.previewValueSelector) {
-                this.anchorPreview.querySelector(this.previewValueSelector).textContent = anchorEl.attributes.href.value;
-                this.anchorPreview.querySelector(this.previewValueSelector).href = anchorEl.attributes.href.value;
-            }
+			if (this.previewValueSelector) {
+				this.anchorPreview.querySelector(this.previewValueSelector).textContent = anchorEl.attributes.href.value;
+				this.anchorPreview.querySelector(this.previewValueSelector).href = anchorEl.attributes.href.value;
+			}
 
-            this.anchorPreview.classList.add('medium-toolbar-arrow-over');
-            this.anchorPreview.classList.remove('medium-toolbar-arrow-under');
+			this.anchorPreview.classList.add('medium-toolbar-arrow-over');
+			this.anchorPreview.classList.remove('medium-toolbar-arrow-under');
 
-            if (!this.anchorPreview.classList.contains('medium-editor-anchor-preview-active')) {
-                this.anchorPreview.classList.add('medium-editor-anchor-preview-active');
-            }
+			if (!this.anchorPreview.classList.contains('medium-editor-anchor-preview-active')) {
+				this.anchorPreview.classList.add('medium-editor-anchor-preview-active');
+			}
 
-            this.activeAnchor = anchorEl;
+			this.activeAnchor = anchorEl;
 
-            this.positionPreview();
-            this.attachPreviewHandlers();
+			this.positionPreview();
+			this.attachPreviewHandlers();
 
-            return this;
-        },
+			return this;
+		},
 
-        positionPreview: function (activeAnchor) {
-            activeAnchor = activeAnchor || this.activeAnchor;
-            var containerWidth = this.window.innerWidth,
-                buttonHeight = this.anchorPreview.offsetHeight,
-                boundary = activeAnchor.getBoundingClientRect(),
-                diffLeft = this.diffLeft,
-                diffTop = this.diffTop,
-                elementsContainer = this.getEditorOption('elementsContainer'),
-                elementsContainerAbsolute = ['absolute', 'fixed'].indexOf(window.getComputedStyle(elementsContainer).getPropertyValue('position')) > -1,
-                relativeBoundary = {},
-                halfOffsetWidth, defaultLeft, middleBoundary, elementsContainerBoundary, top;
+		positionPreview: function (activeAnchor) {
+			activeAnchor = activeAnchor || this.activeAnchor;
+			var containerWidth = this.window.innerWidth,
+				buttonHeight = this.anchorPreview.offsetHeight,
+				boundary = activeAnchor.getBoundingClientRect(),
+				diffLeft = this.diffLeft,
+				diffTop = this.diffTop,
+				elementsContainer = this.getEditorOption('elementsContainer'),
+				elementsContainerAbsolute = ['absolute', 'fixed'].indexOf(window.getComputedStyle(elementsContainer).getPropertyValue('position')) > -1,
+				relativeBoundary = {},
+				halfOffsetWidth, defaultLeft, middleBoundary, elementsContainerBoundary, top;
 
-            halfOffsetWidth = this.anchorPreview.offsetWidth / 2;
-            var toolbarExtension = this.base.getExtensionByName('toolbar');
-            if (toolbarExtension) {
-                diffLeft = toolbarExtension.diffLeft;
-                diffTop = toolbarExtension.diffTop;
-            }
-            defaultLeft = diffLeft - halfOffsetWidth;
+			halfOffsetWidth = this.anchorPreview.offsetWidth / 2;
+			var toolbarExtension = this.base.getExtensionByName('toolbar');
+			if (toolbarExtension) {
+				diffLeft = toolbarExtension.diffLeft;
+				diffTop = toolbarExtension.diffTop;
+			}
+			defaultLeft = diffLeft - halfOffsetWidth;
 
-            // If container element is absolute / fixed, recalculate boundaries to be relative to the container
-            if (elementsContainerAbsolute) {
-                elementsContainerBoundary = elementsContainer.getBoundingClientRect();
-                ['top', 'left'].forEach(function (key) {
-                    relativeBoundary[key] = boundary[key] - elementsContainerBoundary[key];
-                });
+			// If container element is absolute / fixed, recalculate boundaries to be relative to the container
+			if (elementsContainerAbsolute) {
+				elementsContainerBoundary = elementsContainer.getBoundingClientRect();
+				['top', 'left'].forEach(function (key) {
+					relativeBoundary[key] = boundary[key] - elementsContainerBoundary[key];
+				});
 
-                relativeBoundary.width = boundary.width;
-                relativeBoundary.height = boundary.height;
-                boundary = relativeBoundary;
+				relativeBoundary.width = boundary.width;
+				relativeBoundary.height = boundary.height;
+				boundary = relativeBoundary;
 
-                containerWidth = elementsContainerBoundary.width;
+				containerWidth = elementsContainerBoundary.width;
 
-                // Adjust top position according to container scroll position
-                top = elementsContainer.scrollTop;
-            } else {
-                // Adjust top position according to window scroll position
-                top = this.window.pageYOffset;
-            }
+				// Adjust top position according to container scroll position
+				top = elementsContainer.scrollTop;
+			} else {
+				// Adjust top position according to window scroll position
+				top = this.window.pageYOffset;
+			}
 
-            middleBoundary = boundary.left + boundary.width / 2;
-            top += buttonHeight + boundary.top + boundary.height - diffTop - this.anchorPreview.offsetHeight;
+			middleBoundary = boundary.left + boundary.width / 2;
+			top += buttonHeight + boundary.top + boundary.height - diffTop - this.anchorPreview.offsetHeight;
 
-            this.anchorPreview.style.top = Math.round(top) + 'px';
-            this.anchorPreview.style.right = 'initial';
-            if (middleBoundary < halfOffsetWidth) {
-                this.anchorPreview.style.left = defaultLeft + halfOffsetWidth + 'px';
-                this.anchorPreview.style.right = 'initial';
-            } else if ((containerWidth - middleBoundary) < halfOffsetWidth) {
-                this.anchorPreview.style.left = 'auto';
-                this.anchorPreview.style.right = 0;
-            } else {
-                this.anchorPreview.style.left = defaultLeft + middleBoundary + 'px';
-                this.anchorPreview.style.right = 'initial';
-            }
-        },
+			this.anchorPreview.style.top = Math.round(top) + 'px';
+			this.anchorPreview.style.right = 'initial';
+			if (middleBoundary < halfOffsetWidth) {
+				this.anchorPreview.style.left = defaultLeft + halfOffsetWidth + 'px';
+				this.anchorPreview.style.right = 'initial';
+			} else if ((containerWidth - middleBoundary) < halfOffsetWidth) {
+				this.anchorPreview.style.left = 'auto';
+				this.anchorPreview.style.right = 0;
+			} else {
+				this.anchorPreview.style.left = defaultLeft + middleBoundary + 'px';
+				this.anchorPreview.style.right = 'initial';
+			}
+		},
 
-        attachToEditables: function () {
-            this.subscribe('editableMouseover', this.handleEditableMouseover.bind(this));
-            this.subscribe('positionedToolbar', this.handlePositionedToolbar.bind(this));
-        },
+		attachToEditables: function () {
+			this.subscribe('editableMouseover', this.handleEditableMouseover.bind(this));
+			this.subscribe('positionedToolbar', this.handlePositionedToolbar.bind(this));
+		},
 
-        handlePositionedToolbar: function () {
-            // If the toolbar is visible and positioned, we don't need to hide the preview
-            // when showWhenToolbarIsVisible is true
-            if (!this.showWhenToolbarIsVisible) {
-                this.hidePreview();
-            }
-        },
+		handlePositionedToolbar: function () {
+			// If the toolbar is visible and positioned, we don't need to hide the preview
+			// when showWhenToolbarIsVisible is true
+			if (!this.showWhenToolbarIsVisible) {
+				this.hidePreview();
+			}
+		},
 
-        handleClick: function (event) {
-            var anchorExtension = this.base.getExtensionByName('anchor'),
-                activeAnchor = this.activeAnchor;
+		handleClick: function (event) {
+			var anchorExtension = this.base.getExtensionByName('anchor'),
+				activeAnchor = this.activeAnchor;
 
-            if (anchorExtension && activeAnchor) {
-                event.preventDefault();
+			if (anchorExtension && activeAnchor) {
+				event.preventDefault();
 
-                this.base.selectElement(this.activeAnchor);
+				this.base.selectElement(this.activeAnchor);
 
-                // Using setTimeout + delay because:
-                // We may actually be displaying the anchor form, which should be controlled by delay
-                this.base.delay(function () {
-                    if (activeAnchor) {
-                        var opts = {
-                            value: activeAnchor.attributes.href.value,
-                            target: activeAnchor.getAttribute('target'),
-                            buttonClass: activeAnchor.getAttribute('class')
-                        };
-                        anchorExtension.showForm(opts);
-                        activeAnchor = null;
-                    }
-                }.bind(this));
-            }
+				// Using setTimeout + delay because:
+				// We may actually be displaying the anchor form, which should be controlled by delay
+				this.base.delay(function () {
+					if (activeAnchor) {
+						var opts = {
+							value: activeAnchor.attributes.href.value,
+							target: activeAnchor.getAttribute('target'),
+							buttonClass: activeAnchor.getAttribute('class')
+						};
+						anchorExtension.showForm(opts);
+						activeAnchor = null;
+					}
+				}.bind(this));
+			}
 
-            this.hidePreview();
-        },
+			this.hidePreview();
+		},
 
-        handleAnchorMouseout: function () {
-            this.anchorToPreview = null;
-            this.off(this.activeAnchor, 'mouseout', this.instanceHandleAnchorMouseout);
-            this.instanceHandleAnchorMouseout = null;
-        },
+		handleAnchorMouseout: function () {
+			this.anchorToPreview = null;
+			this.off(this.activeAnchor, 'mouseout', this.instanceHandleAnchorMouseout);
+			this.instanceHandleAnchorMouseout = null;
+		},
 
-        handleEditableMouseover: function (event) {
-            var target = MediumEditor.util.getClosestTag(event.target, 'a');
+		handleEditableMouseover: function (event) {
+			var target = MediumEditor.util.getClosestTag(event.target, 'a');
 
-            if (false === target) {
-                return;
-            }
+			if (false === target) {
+				return;
+			}
 
-            // Detect empty href attributes
-            // The browser will make href="" or href="#top"
-            // into absolute urls when accessed as event.target.href, so check the html
-            if (!this.showOnEmptyLinks &&
-                (!/href=["']\S+["']/.test(target.outerHTML) || /href=["']#\S+["']/.test(target.outerHTML))) {
-                return true;
-            }
+			// Detect empty href attributes
+			// The browser will make href="" or href="#top"
+			// into absolute urls when accessed as event.target.href, so check the html
+			if (!this.showOnEmptyLinks &&
+				(!/href=["']\S+["']/.test(target.outerHTML) || /href=["']#\S+["']/.test(target.outerHTML))) {
+				return true;
+			}
 
-            // only show when toolbar is not present
-            var toolbar = this.base.getExtensionByName('toolbar');
-            if (!this.showWhenToolbarIsVisible && toolbar && toolbar.isDisplayed && toolbar.isDisplayed()) {
-                return true;
-            }
+			// only show when toolbar is not present
+			var toolbar = this.base.getExtensionByName('toolbar');
+			if (!this.showWhenToolbarIsVisible && toolbar && toolbar.isDisplayed && toolbar.isDisplayed()) {
+				return true;
+			}
 
-            // detach handler for other anchor in case we hovered multiple anchors quickly
-            if (this.activeAnchor && this.activeAnchor !== target) {
-                this.detachPreviewHandlers();
-            }
+			// detach handler for other anchor in case we hovered multiple anchors quickly
+			if (this.activeAnchor && this.activeAnchor !== target) {
+				this.detachPreviewHandlers();
+			}
 
-            this.anchorToPreview = target;
+			this.anchorToPreview = target;
 
-            this.instanceHandleAnchorMouseout = this.handleAnchorMouseout.bind(this);
-            this.on(this.anchorToPreview, 'mouseout', this.instanceHandleAnchorMouseout);
-            // Using setTimeout + delay because:
-            // - We're going to show the anchor preview according to the configured delay
-            //   if the mouse has not left the anchor tag in that time
-            this.base.delay(function () {
-                if (this.anchorToPreview) {
-                    this.showPreview(this.anchorToPreview);
-                }
-            }.bind(this));
-        },
+			this.instanceHandleAnchorMouseout = this.handleAnchorMouseout.bind(this);
+			this.on(this.anchorToPreview, 'mouseout', this.instanceHandleAnchorMouseout);
+			// Using setTimeout + delay because:
+			// - We're going to show the anchor preview according to the configured delay
+			//   if the mouse has not left the anchor tag in that time
+			this.base.delay(function () {
+				if (this.anchorToPreview) {
+					this.showPreview(this.anchorToPreview);
+				}
+			}.bind(this));
+		},
 
-        handlePreviewMouseover: function () {
-            this.lastOver = (new Date()).getTime();
-            this.hovering = true;
-        },
+		handlePreviewMouseover: function () {
+			this.lastOver = (new Date()).getTime();
+			this.hovering = true;
+		},
 
-        handlePreviewMouseout: function (event) {
-            if (!event.relatedTarget || !/anchor-preview/.test(event.relatedTarget.className)) {
-                this.hovering = false;
-            }
-        },
+		handlePreviewMouseout: function (event) {
+			if (!event.relatedTarget || !/anchor-preview/.test(event.relatedTarget.className)) {
+				this.hovering = false;
+			}
+		},
 
-        updatePreview: function () {
-            if (this.hovering) {
-                return true;
-            }
-            var durr = (new Date()).getTime() - this.lastOver;
-            if (durr > this.hideDelay) {
-                // hide the preview 1/2 second after mouse leaves the link
-                this.detachPreviewHandlers();
-            }
-        },
+		updatePreview: function () {
+			if (this.hovering) {
+				return true;
+			}
+			var durr = (new Date()).getTime() - this.lastOver;
+			if (durr > this.hideDelay) {
+				// hide the preview 1/2 second after mouse leaves the link
+				this.detachPreviewHandlers();
+			}
+		},
 
-        detachPreviewHandlers: function () {
-            // cleanup
-            clearInterval(this.intervalTimer);
-            if (this.instanceHandlePreviewMouseover) {
-                this.off(this.anchorPreview, 'mouseover', this.instanceHandlePreviewMouseover);
-                this.off(this.anchorPreview, 'mouseout', this.instanceHandlePreviewMouseout);
-                if (this.activeAnchor) {
-                    this.off(this.activeAnchor, 'mouseover', this.instanceHandlePreviewMouseover);
-                    this.off(this.activeAnchor, 'mouseout', this.instanceHandlePreviewMouseout);
-                }
-            }
+		detachPreviewHandlers: function () {
+			// cleanup
+			clearInterval(this.intervalTimer);
+			if (this.instanceHandlePreviewMouseover) {
+				this.off(this.anchorPreview, 'mouseover', this.instanceHandlePreviewMouseover);
+				this.off(this.anchorPreview, 'mouseout', this.instanceHandlePreviewMouseout);
+				if (this.activeAnchor) {
+					this.off(this.activeAnchor, 'mouseover', this.instanceHandlePreviewMouseover);
+					this.off(this.activeAnchor, 'mouseout', this.instanceHandlePreviewMouseout);
+				}
+			}
 
-            this.hidePreview();
+			this.hidePreview();
 
-            this.hovering = this.instanceHandlePreviewMouseover = this.instanceHandlePreviewMouseout = null;
-        },
+			this.hovering = this.instanceHandlePreviewMouseover = this.instanceHandlePreviewMouseout = null;
+		},
 
-        // TODO: break up method and extract out handlers
-        attachPreviewHandlers: function () {
-            this.lastOver = (new Date()).getTime();
-            this.hovering = true;
+		// TODO: break up method and extract out handlers
+		attachPreviewHandlers: function () {
+			this.lastOver = (new Date()).getTime();
+			this.hovering = true;
 
-            this.instanceHandlePreviewMouseover = this.handlePreviewMouseover.bind(this);
-            this.instanceHandlePreviewMouseout = this.handlePreviewMouseout.bind(this);
+			this.instanceHandlePreviewMouseover = this.handlePreviewMouseover.bind(this);
+			this.instanceHandlePreviewMouseout = this.handlePreviewMouseout.bind(this);
 
-            this.intervalTimer = setInterval(this.updatePreview.bind(this), 200);
+			this.intervalTimer = setInterval(this.updatePreview.bind(this), 200);
 
-            this.on(this.anchorPreview, 'mouseover', this.instanceHandlePreviewMouseover);
-            this.on(this.anchorPreview, 'mouseout', this.instanceHandlePreviewMouseout);
-            this.on(this.activeAnchor, 'mouseover', this.instanceHandlePreviewMouseover);
-            this.on(this.activeAnchor, 'mouseout', this.instanceHandlePreviewMouseout);
-        }
-    });
+			this.on(this.anchorPreview, 'mouseover', this.instanceHandlePreviewMouseover);
+			this.on(this.anchorPreview, 'mouseout', this.instanceHandlePreviewMouseout);
+			this.on(this.activeAnchor, 'mouseover', this.instanceHandlePreviewMouseover);
+			this.on(this.activeAnchor, 'mouseout', this.instanceHandlePreviewMouseout);
+		}
+	});
 
-    MediumEditor.extensions.anchorPreview = AnchorPreview;
+	MediumEditor.extensions.anchorPreview = AnchorPreview;
 }());
 
 (function () {
@@ -5155,7 +5195,7 @@ MediumEditor.extensions = {};
         };
 
     /*jslint regexp: true*/
-    /*
+    /**
         jslint does not allow character negation, because the negation
         will not match any unicode characters. In the regexes in this
         block, negation is used specifically to match the end of an html
@@ -6563,6 +6603,8 @@ MediumEditor.extensions = {};
 (function () {
     'use strict';
 
+    var initialContent = {};
+
     // Event handlers that shouldn't be exposed externally
 
     function handleDisableExtraSpaces(event) {
@@ -6584,7 +6626,7 @@ MediumEditor.extensions = {};
             // if current text selection is empty OR previous sibling text is empty OR it is not a list
             if ((node && node.textContent.trim() === '' && node.nodeName.toLowerCase() !== 'li') ||
                 (node.previousElementSibling && node.previousElementSibling.nodeName.toLowerCase() !== 'br' &&
-                 node.previousElementSibling.textContent.trim() === '')) {
+                    node.previousElementSibling.textContent.trim() === '')) {
                 event.preventDefault();
             }
         }
@@ -6620,12 +6662,12 @@ MediumEditor.extensions = {};
             isHeader = /h\d/i;
 
         if (MediumEditor.util.isKey(event, [MediumEditor.util.keyCode.BACKSPACE, MediumEditor.util.keyCode.ENTER]) &&
-                // has a preceeding sibling
-                node.previousElementSibling &&
-                // in a header
-                isHeader.test(tagName) &&
-                // at the very end of the block
-                MediumEditor.selection.getCaretOffsets(node).left === 0) {
+            // has a preceeding sibling
+            node.previousElementSibling &&
+            // in a header
+            isHeader.test(tagName) &&
+            // at the very end of the block
+            MediumEditor.selection.getCaretOffsets(node).left === 0) {
             if (MediumEditor.util.isKey(event, MediumEditor.util.keyCode.BACKSPACE) && isEmpty.test(node.previousElementSibling.innerHTML)) {
                 // backspacing the begining of a header into an empty previous element will
                 // change the tagName of the current node to prevent one
@@ -6641,15 +6683,15 @@ MediumEditor.extensions = {};
                 event.preventDefault();
             }
         } else if (MediumEditor.util.isKey(event, MediumEditor.util.keyCode.DELETE) &&
-                    // between two sibling elements
-                    node.nextElementSibling &&
-                    node.previousElementSibling &&
-                    // not in a header
-                    !isHeader.test(tagName) &&
-                    // in an empty tag
-                    isEmpty.test(node.innerHTML) &&
-                    // when the next tag *is* a header
-                    isHeader.test(node.nextElementSibling.nodeName.toLowerCase())) {
+            // between two sibling elements
+            node.nextElementSibling &&
+            node.previousElementSibling &&
+            // not in a header
+            !isHeader.test(tagName) &&
+            // in an empty tag
+            isEmpty.test(node.innerHTML) &&
+            // when the next tag *is* a header
+            isHeader.test(node.nextElementSibling.nodeName.toLowerCase())) {
             // hitting delete in an empty element preceding a header, ex:
             //  <p>[CURSOR]</p><h1>Header</h1>
             // Will cause the h1 to become a paragraph.
@@ -6662,16 +6704,16 @@ MediumEditor.extensions = {};
 
             event.preventDefault();
         } else if (MediumEditor.util.isKey(event, MediumEditor.util.keyCode.BACKSPACE) &&
-                tagName === 'li' &&
-                // hitting backspace inside an empty li
-                isEmpty.test(node.innerHTML) &&
-                // is first element (no preceeding siblings)
-                !node.previousElementSibling &&
-                // parent also does not have a sibling
-                !node.parentElement.previousElementSibling &&
-                // is not the only li in a list
-                node.nextElementSibling &&
-                node.nextElementSibling.nodeName.toLowerCase() === 'li') {
+            tagName === 'li' &&
+            // hitting backspace inside an empty li
+            isEmpty.test(node.innerHTML) &&
+            // is first element (no preceeding siblings)
+            !node.previousElementSibling &&
+            // parent also does not have a sibling
+            !node.parentElement.previousElementSibling &&
+            // is not the only li in a list
+            node.nextElementSibling &&
+            node.nextElementSibling.nodeName.toLowerCase() === 'li') {
             // backspacing in an empty first list element in the first list (with more elements) ex:
             //  <ul><li>[CURSOR]</li><li>List Item 2</li></ul>
             // will remove the first <li> but add some extra element before (varies based on browser)
@@ -6693,16 +6735,16 @@ MediumEditor.extensions = {};
 
             event.preventDefault();
         } else if (MediumEditor.util.isKey(event, MediumEditor.util.keyCode.BACKSPACE) &&
-                (MediumEditor.util.getClosestTag(node, 'blockquote') !== false) &&
-                MediumEditor.selection.getCaretOffsets(node).left === 0) {
+            (MediumEditor.util.getClosestTag(node, 'blockquote') !== false) &&
+            MediumEditor.selection.getCaretOffsets(node).left === 0) {
 
             // when cursor is at the begining of the element and the element is <blockquote>
             // then pressing backspace key should change the <blockquote> to a <p> tag
             event.preventDefault();
             MediumEditor.util.execFormatBlock(this.options.ownerDocument, 'p');
         } else if (MediumEditor.util.isKey(event, MediumEditor.util.keyCode.ENTER) &&
-                (MediumEditor.util.getClosestTag(node, 'blockquote') !== false) &&
-                MediumEditor.selection.getCaretOffsets(node).right === 0) {
+            (MediumEditor.util.getClosestTag(node, 'blockquote') !== false) &&
+            MediumEditor.selection.getCaretOffsets(node).right === 0) {
 
             // when cursor is at the end of <blockquote>,
             // then pressing enter key should create <p> tag, not <blockquote>
@@ -6715,10 +6757,10 @@ MediumEditor.extensions = {};
 
             event.preventDefault();
         } else if (MediumEditor.util.isKey(event, MediumEditor.util.keyCode.BACKSPACE) &&
-                MediumEditor.util.isMediumEditorElement(node.parentElement) &&
-                !node.previousElementSibling &&
-                node.nextElementSibling &&
-                isEmpty.test(node.innerHTML)) {
+            MediumEditor.util.isMediumEditorElement(node.parentElement) &&
+            !node.previousElementSibling &&
+            node.nextElementSibling &&
+            isEmpty.test(node.innerHTML)) {
 
             // when cursor is in the first element, it's empty and user presses backspace,
             // do delete action instead to get rid of the first element and move caret to 2nd
@@ -6742,6 +6784,12 @@ MediumEditor.extensions = {};
             this.options.ownerDocument.execCommand('formatBlock', false, 'p');
         }
 
+        // https://github.com/yabwe/medium-editor/issues/1455
+        // if somehow we have the BR as the selected element, typing does nothing, so move the cursor
+        if (node.nodeName === 'BR') {
+            MediumEditor.selection.moveCursor(this.options.ownerDocument, node.parentElement);
+        }
+
         // https://github.com/yabwe/medium-editor/issues/834
         // https://github.com/yabwe/medium-editor/pull/382
         // Don't call format block if this is a block element (ie h1, figCaption, etc.)
@@ -6755,6 +6803,14 @@ MediumEditor.extensions = {};
                 this.options.ownerDocument.execCommand('unlink', false, null);
             } else if (!event.shiftKey && !event.ctrlKey) {
                 this.options.ownerDocument.execCommand('formatBlock', false, 'p');
+                // https://github.com/yabwe/medium-editor/issues/1455
+                // firefox puts the focus on the br - so we need to move the cursor to the newly created p
+                if (MediumEditor.util.isFF) {
+                    var newParagraph = node.querySelector('p');
+                    if (newParagraph) {
+                        MediumEditor.selection.moveCursor(this.options.ownerDocument, newParagraph);
+                    }
+                }
             }
         }
     }
@@ -6880,8 +6936,8 @@ MediumEditor.extensions = {};
         // If any of the elements don't have the toolbar disabled
         // We need a toolbar
         if (this.elements.every(function (element) {
-                return !!element.getAttribute('data-disable-toolbar');
-            })) {
+            return !!element.getAttribute('data-disable-toolbar');
+        })) {
             return false;
         }
 
@@ -7232,8 +7288,6 @@ MediumEditor.extensions = {};
         }
     }
 
-    var initialContent = {};
-
     MediumEditor.prototype = {
         // NOT DOCUMENTED - exposed for backwards compatability
         init: function (elements, options) {
@@ -7504,13 +7558,23 @@ MediumEditor.extensions = {};
                 MediumEditor.util.cleanListDOM(this.options.ownerDocument, this.getSelectedParentElement());
             }
 
+            // https://github.com/yabwe/medium-editor/issues/1496
+            // But only if something is selected i.e, getSelectedParentElement !== {}
+            if (this.getSelectedParentElement().length > 0 && MediumEditor.util.isFF) {
+                MediumEditor.util.getContainerEditorElement(this.getSelectedParentElement()).focus();
+            }
+
             this.checkSelection();
             return result;
         },
 
         getSelectedParentElement: function (range) {
             if (range === undefined) {
-                range = this.options.contentWindow.getSelection().getRangeAt(0);
+                try {
+                    range = this.options.contentWindow.getSelection().getRangeAt(0);
+                } catch (err) {
+                    return {};
+                }
             }
             return MediumEditor.selection.getSelectedParentElement(range);
         },
@@ -7665,7 +7729,7 @@ MediumEditor.extensions = {};
                                     0,
                                     parentElement.lastChild,
                                     parentElement.lastChild.nodeType === 3 ?
-                                    parentElement.lastChild.nodeValue.length : parentElement.lastChild.childNodes.length
+                                        parentElement.lastChild.nodeValue.length : parentElement.lastChild.childNodes.length
                                 );
                             } else {
                                 MediumEditor.selection.select(
