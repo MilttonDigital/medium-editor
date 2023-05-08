@@ -209,8 +209,11 @@
 				url = anchor.href;
 				target = anchor.target;
 			} else {
-				title = range;
+				title = range + '';
 				url = '';
+				if (this.isEmail(title)) {
+					url = 'mailto:' + title.toLowerCase();
+				}
 			}
 
 			this.linkObject = {
@@ -277,17 +280,28 @@
 			return queryString.split('&').map(this.ensureEncodedParam.bind(this)).join('&');
 		},
 
+		isEmail: function (email) {
+			email += ''; // ensure it's a string
+			return email.match(
+				/^(([^<>()[\]\\.,;:\s@\"]+(\.[^<>()[\]\\.,;:\s@\"]+)*)|(\".+\"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/
+			);
+		},
+
 		checkLinkFormat: function (value) {
 			// Matches any alphabetical characters followed by ://
 			// Matches protocol relative "//"
 			// Matches common external protocols "mailto:" "tel:" "maps:"
 			// Matches relative hash link, begins with "#"
+			var urlRex = /^(.*?)(?:\?(.*?))?(?:#(.*))?$/;
+
+			var valueString = value + '';
+
 			var urlSchemeRegex = /^([a-z]+:)?\/\/|^(mailto|tel|maps):|^\#/i,
 				hasScheme = urlSchemeRegex.test(value),
 				scheme = '',
 				// telRegex is a regex for checking if the string is a telephone number
 				telRegex = /^\+?\s?\(?(?:\d\s?\-?\)?){3,20}$/,
-				urlParts = value.match(/^(.*?)(?:\?(.*?))?(?:#(.*))?$/),
+				urlParts = valueString.match(urlRex),
 				path = urlParts[1],
 				query = urlParts[2],
 				fragment = urlParts[3];
